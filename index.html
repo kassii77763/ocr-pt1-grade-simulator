@@ -352,7 +352,7 @@
       margin-top: 4px;
     }
 
-    /* Visual Stacked Bar */
+    /* Visual Stacked Bar - transition removed for instant, buttery response */
     .stack-container {
       margin-bottom: 16px;
     }
@@ -377,7 +377,7 @@
     .stack-earned {
       height: 100%;
       background: linear-gradient(90deg, #b8860b, var(--gold-bright));
-      transition: width 0.2s ease;
+      will-change: width;
     }
 
     .stack-needed {
@@ -389,7 +389,7 @@
         rgba(16, 185, 129, 0.25) 6px,
         rgba(16, 185, 129, 0.25) 12px
       );
-      transition: width 0.2s ease;
+      will-change: width;
     }
 
     .stack-marker {
@@ -400,6 +400,7 @@
       background: #ffffff;
       box-shadow: 0 0 4px #000;
       z-index: 5;
+      will-change: left;
     }
 
     /* Interactive Sliders with +/- Stepper Buttons */
@@ -470,18 +471,24 @@
       background: var(--bg-base);
       border-radius: 99px;
       outline: none;
+      touch-action: pan-y;
     }
 
     input[type="range"]::-webkit-slider-thumb {
       -webkit-appearance: none;
       appearance: none;
-      width: 22px;
-      height: 22px;
+      width: 24px;
+      height: 24px;
       border-radius: 50%;
       background: var(--gold-bright);
       border: 2px solid #fff;
       cursor: pointer;
       box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+      transition: transform 0.1s ease;
+    }
+
+    input[type="range"]:active::-webkit-slider-thumb {
+      transform: scale(1.15);
     }
 
     .val-pill {
@@ -736,6 +743,13 @@
       } catch (e) {}
     }
 
+    // Debounced storage save to prevent synchronous I/O stutter during active dragging
+    let saveTimeout = null;
+    function debouncedSaveStorage() {
+      if (saveTimeout) clearTimeout(saveTimeout);
+      saveTimeout = setTimeout(saveStorage, 300);
+    }
+
     function saveStorage() {
       try {
         const payload = { targetGrade, inputs: {} };
@@ -747,49 +761,6 @@
         });
         localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
       } catch (e) {}
-    }
-
-    function setTarget(score) {
-      targetGrade = score;
-      document.querySelectorAll('.seg-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.textContent.startsWith(score + '点'));
-      });
-      saveStorage();
-      render();
-    }
-
-    function setFilter(cat) {
-      activeFilter = cat;
-      const order = ['all', 'annual', 'second_mix', 'second_100', 'practical'];
-      document.querySelectorAll('.cat-pill').forEach((btn, i) => {
-        btn.classList.toggle('active', order[i] === cat);
-      });
-      render();
-    }
-
-    function updateVal(subjId, key, newVal) {
-      const subj = state.find(s => s.id === subjId);
-      if (!subj) return;
-      const inp = subj.inputs.find(i => i.key === key);
-      if (!inp) return;
-      const clamped = Math.max(inp.min, Math.min(inp.max, Number(newVal)));
-      inp.val = clamped;
-      saveStorage();
-      render();
-    }
-
-    function stepVal(subjId, key, delta) {
-      const subj = state.find(s => s.id === subjId);
-      if (!subj) return;
-      const inp = subj.inputs.find(i => i.key === key);
-      if (!inp) return;
-      updateVal(subjId, key, inp.val + delta);
-    }
-
-    function resetAll() {
-      state = JSON.parse(JSON.stringify(SUBJECTS_DEFAULT));
-      localStorage.removeItem(STORAGE_KEY);
-      render();
     }
 
     function calculateSubject(subj) {
@@ -834,8 +805,89 @@
       }
     }
 
-    function render() {
-      // Update top summary
+    /* Fine-grained direct DOM updates: updates only the affected card elements without rebuilding HTML */
+    function updateSubjectUI(subjId) {
+      const subj = state.find(s => s.id === subjId);
+      if (!subj) return;
+
+      const calc = calculateSubject(subj);
+      const st = getStatusInfo(calc.ceilReq);
+
+      // 1. Update Card border status
+      const card = document.getElementById(`card-${subj.id}`);
+      if (card) {
+        card.className = `card ${st.cls}`;
+      }
+
+      // 2. Update Readout panel numbers
+      const earnedNumEl = document.getElementById(`earned-num-${subj.id}`);
+      if (earnedNumEl) {
+        earnedNumEl.innerHTML = `${calc.earnedWeighted} <small>${subj.isPenaltyMode ? '点' : `/ ${calc.maxPreExam}点満点`}</small>`;
+      }
+
+      const formulaEl = document.getElementById(`formula-hint-${subj.id}`);
+      if (formulaEl) {
+        formulaEl.textContent = subj.isPenaltyMode
+          ? `目標${targetGrade}点 + 減点${Math.abs(calc.earnedWeighted)}点`
+          : `残り ${calc.neededWeighted}点分を期末(${Math.round(subj.finalExamWeight * 100)}%)で回収`;
+      }
+
+      const reqMainEl = document.getElementById(`req-main-${subj.id}`);
+      if (reqMainEl) {
+        reqMainEl.style.color = st.color;
+        reqMainEl.innerHTML = `${calc.ceilReq}<small>点以上</small>`;
+      }
+
+      const reqExactEl = document.getElementById(`req-exact-${subj.id}`);
+      if (reqExactEl) {
+        reqExactEl.textContent = `（厳密計算値: ${calc.exactReq}点）`;
+      }
+
+      const statusBadgeEl = document.getElementById(`status-badge-${subj.id}`);
+      if (statusBadgeEl) {
+        statusBadgeEl.style.color = st.color;
+        statusBadgeEl.style.background = st.bg;
+        statusBadgeEl.textContent = st.label;
+      }
+
+      // 3. Update Progress Bars
+      if (!subj.isPenaltyMode) {
+        const earnedBarW = Math.min(100, Math.max(0, calc.earnedWeighted));
+        const neededBarW = Math.min(100 - earnedBarW, Math.max(0, calc.neededWeighted));
+
+        const barEarned = document.getElementById(`bar-earned-${subj.id}`);
+        if (barEarned) barEarned.style.width = `${earnedBarW}%`;
+
+        const barNeeded = document.getElementById(`bar-needed-${subj.id}`);
+        if (barNeeded) barNeeded.style.width = `${neededBarW}%`;
+
+        const marker = document.getElementById(`marker-${subj.id}`);
+        if (marker) marker.style.left = `${targetGrade}%`;
+
+        const stackEarnedText = document.getElementById(`stack-earned-text-${subj.id}`);
+        if (stackEarnedText) stackEarnedText.textContent = `■ 現在の持ち点 (${calc.earnedWeighted}点)`;
+
+        const stackNeededText = document.getElementById(`stack-needed-text-${subj.id}`);
+        if (stackNeededText) stackNeededText.textContent = `■ 期末で必要 (+${calc.neededWeighted}点)`;
+      }
+
+      // 4. Update Input Control Labels (weighted score and value pill)
+      subj.inputs.forEach(inp => {
+        const subtextEl = document.getElementById(`subtext-${subj.id}-${inp.key}`);
+        if (subtextEl) {
+          subtextEl.textContent = subj.isPenaltyMode
+            ? `減点: -${inp.val * inp.penalty}点`
+            : `成績換算: ${(inp.val * inp.weight).toFixed(1)}点 / ${Math.round(inp.weight * 100)}点`;
+        }
+        const valPillEl = document.getElementById(`val-pill-${subj.id}-${inp.key}`);
+        if (valPillEl) {
+          valPillEl.textContent = `${inp.val}${inp.unit}`;
+        }
+      });
+    }
+
+    /* Update top summary strip and static tables */
+    function updateSummaryUI() {
       document.getElementById('sum-target').textContent = `${targetGrade}点`;
       let safeCount = 0;
       let warnCount = 0;
@@ -847,12 +899,98 @@
       document.getElementById('sum-safe-count').textContent = `${safeCount}科目`;
       document.getElementById('sum-warn-count').textContent = `${warnCount}科目`;
 
+      // Update 100% exam required score in table
+      document.querySelectorAll('.target-grade-cell').forEach(td => {
+        td.textContent = `${targetGrade}点`;
+      });
+      const table100Hint = document.getElementById('table-100-hint');
+      if (table100Hint) {
+        table100Hint.innerHTML = `以下の4科目は期末試験100%評価のため、<strong>期末試験で「${targetGrade}点」を取ればそのまま総合${targetGrade}点</strong>になります。`;
+      }
+    }
+
+    /* Fast live input handler: updates DOM instantly, debounces storage */
+    function updateVal(subjId, key, newVal) {
+      const subj = state.find(s => s.id === subjId);
+      if (!subj) return;
+      const inp = subj.inputs.find(i => i.key === key);
+      if (!inp) return;
+      const clamped = Math.max(inp.min, Math.min(inp.max, Number(newVal)));
+      if (inp.val === clamped) return;
+      inp.val = clamped;
+
+      updateSubjectUI(subjId);
+      updateSummaryUI();
+      debouncedSaveStorage();
+    }
+
+    function stepVal(subjId, key, delta) {
+      const subj = state.find(s => s.id === subjId);
+      if (!subj) return;
+      const inp = subj.inputs.find(i => i.key === key);
+      if (!inp) return;
+      const slider = document.getElementById(`slider-${subj.id}-${inp.key}`);
+      const nextVal = Math.max(inp.min, Math.min(inp.max, inp.val + delta));
+      if (slider) slider.value = nextVal;
+      updateVal(subjId, key, nextVal);
+      saveStorage();
+    }
+
+    function setTarget(score) {
+      targetGrade = score;
+      document.querySelectorAll('.seg-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.textContent.startsWith(score + '点'));
+      });
+      state.forEach(s => updateSubjectUI(s.id));
+      updateSummaryUI();
+      saveStorage();
+    }
+
+    function setFilter(cat) {
+      activeFilter = cat;
+      const order = ['all', 'annual', 'second_mix', 'second_100', 'practical'];
+      document.querySelectorAll('.cat-pill').forEach((btn, i) => {
+        btn.classList.toggle('active', order[i] === cat);
+      });
+
+      // Filter cards by display toggle (zero DOM rebuild!)
+      state.forEach(s => {
+        const card = document.getElementById(`card-${s.id}`);
+        if (card) {
+          card.style.display = (cat === 'all' || s.category === cat) ? 'block' : 'none';
+        }
+      });
+
+      const card100 = document.getElementById('card-second-100');
+      if (card100) {
+        card100.style.display = (cat === 'all' || cat === 'second_100') ? 'block' : 'none';
+      }
+
+      const cardPractical = document.getElementById('card-practical');
+      if (cardPractical) {
+        cardPractical.style.display = (cat === 'all' || cat === 'practical') ? 'block' : 'none';
+      }
+    }
+
+    function resetAll() {
+      state = JSON.parse(JSON.stringify(SUBJECTS_DEFAULT));
+      localStorage.removeItem(STORAGE_KEY);
+      state.forEach(s => {
+        s.inputs.forEach(inp => {
+          const slider = document.getElementById(`slider-${s.id}-${inp.key}`);
+          if (slider) slider.value = inp.val;
+        });
+        updateSubjectUI(s.id);
+      });
+      updateSummaryUI();
+    }
+
+    /* Build DOM once at startup */
+    function initDOM() {
       const container = document.getElementById('cards-container');
       let html = '';
 
-      // 1. Render Interactive Simulator Cards
-      const filtered = state.filter(s => activeFilter === 'all' || s.category === activeFilter);
-      filtered.forEach(subj => {
+      state.forEach(subj => {
         const calc = calculateSubject(subj);
         const st = getStatusInfo(calc.ceilReq);
 
@@ -868,14 +1006,15 @@
             <div class="ctrl-item">
               <div class="ctrl-top">
                 <span class="ctrl-title">${inp.label}</span>
-                <span class="ctrl-weighted">${subText}</span>
+                <span class="ctrl-weighted" id="subtext-${subj.id}-${inp.key}">${subText}</span>
               </div>
               <div class="slider-row">
                 <button class="step-btn" onclick="stepVal('${subj.id}', '${inp.key}', -1)">−</button>
-                <input type="range" min="${inp.min}" max="${inp.max}" value="${inp.val}"
-                  oninput="updateVal('${subj.id}', '${inp.key}', this.value)">
+                <input type="range" id="slider-${subj.id}-${inp.key}" min="${inp.min}" max="${inp.max}" value="${inp.val}"
+                  oninput="updateVal('${subj.id}', '${inp.key}', this.value)"
+                  onchange="saveStorage()">
                 <button class="step-btn" onclick="stepVal('${subj.id}', '${inp.key}', 1)">＋</button>
-                <span class="val-pill">${inp.val}${inp.unit}</span>
+                <span class="val-pill" id="val-pill-${subj.id}-${inp.key}">${inp.val}${inp.unit}</span>
               </div>
             </div>
           `;
@@ -887,7 +1026,7 @@
           : Math.min(100 - earnedBarW, Math.max(0, calc.neededWeighted));
 
         html += `
-          <div class="card ${st.cls}">
+          <div class="card ${st.cls}" id="card-${subj.id}">
             <div class="card-top">
               <div>
                 <div class="subj-name">${subj.name}</div>
@@ -901,36 +1040,36 @@
             <div class="readout-panel">
               <div class="earned-block">
                 <span class="earned-label">${subj.isPenaltyMode ? '現在の累積減点' : '試験前の獲得持ち点'}</span>
-                <div class="earned-num">
+                <div class="earned-num" id="earned-num-${subj.id}">
                   ${calc.earnedWeighted} <small>${subj.isPenaltyMode ? '点' : `/ ${calc.maxPreExam}点満点`}</small>
                 </div>
-                <span class="formula-hint">
+                <span class="formula-hint" id="formula-hint-${subj.id}">
                   ${subj.isPenaltyMode
                     ? `目標${targetGrade}点 + 減点${Math.abs(calc.earnedWeighted)}点`
-                    : `残り ${calc.neededWeighted}点分を期末(${Math.round(subj.finalExamWeight*100)}%)で回収`}
+                    : `残り ${calc.neededWeighted}点分を期末(${Math.round(subj.finalExamWeight * 100)}%)で回収`}
                 </span>
               </div>
 
               <div class="target-block">
                 <div class="target-caption">${subj.finalExamLabel} (100点満点)</div>
-                <div class="req-main" style="color:${st.color}">
+                <div class="req-main" id="req-main-${subj.id}" style="color:${st.color}">
                   ${calc.ceilReq}<small>点以上</small>
                 </div>
-                <div class="req-exact">（厳密計算値: ${calc.exactReq}点）</div>
-                <span class="status-badge" style="color:${st.color}; background:${st.bg}">${st.label}</span>
+                <div class="req-exact" id="req-exact-${subj.id}">（厳密計算値: ${calc.exactReq}点）</div>
+                <span class="status-badge" id="status-badge-${subj.id}" style="color:${st.color}; background:${st.bg}">${st.label}</span>
               </div>
             </div>
 
             ${!subj.isPenaltyMode ? `
               <div class="stack-container">
                 <div class="stack-header">
-                  <span>■ 現在の持ち点 (${calc.earnedWeighted}点)</span>
-                  <span>■ 期末で必要 (+${calc.neededWeighted}点)</span>
+                  <span id="stack-earned-text-${subj.id}">■ 現在の持ち点 (${calc.earnedWeighted}点)</span>
+                  <span id="stack-needed-text-${subj.id}">■ 期末で必要 (+${calc.neededWeighted}点)</span>
                 </div>
                 <div class="stack-track">
-                  <div class="stack-earned" style="width:${earnedBarW}%"></div>
-                  <div class="stack-needed" style="width:${neededBarW}%"></div>
-                  <div class="stack-marker" style="left:${targetGrade}%"></div>
+                  <div class="stack-earned" id="bar-earned-${subj.id}" style="width:${earnedBarW}%"></div>
+                  <div class="stack-needed" id="bar-needed-${subj.id}" style="width:${neededBarW}%"></div>
+                  <div class="stack-marker" id="marker-${subj.id}" style="left:${targetGrade}%"></div>
                 </div>
               </div>
             ` : ''}
@@ -943,106 +1082,103 @@
         `;
       });
 
-      // 2. Render 100% Written Exam Card (when filter is 'all' or 'second_100')
-      if (activeFilter === 'all' || activeFilter === 'second_100') {
-        html += `
-          <div class="card status-safe">
-            <div class="card-top">
-              <div>
-                <div class="subj-name">後期・筆記試験 100% 科目一覧</div>
-                <div class="subj-meta">小テスト・レポート配分なし（期末試験の素点＝そのまま成績点）</div>
-              </div>
-              <span class="term-badge">後期・4科目</span>
+      // 100% Written Exam Card
+      html += `
+        <div class="card status-safe" id="card-second-100">
+          <div class="card-top">
+            <div>
+              <div class="subj-name">後期・筆記試験 100% 科目一覧</div>
+              <div class="subj-meta">小テスト・レポート配分なし（期末試験の素点＝そのまま成績点）</div>
             </div>
-            <p style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">
-              以下の4科目は期末試験100%評価のため、<strong>期末試験で「${targetGrade}点」を取ればそのまま総合${targetGrade}点</strong>になります。
-            </p>
-            <table class="table-100">
-              <thead>
-                <tr>
-                  <th>科目名</th>
-                  <th>単位・回数</th>
-                  <th>担当教員</th>
-                  <th>必要素点</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td><strong>日常生活活動学</strong></td>
-                  <td>2単位 (15回)</td>
-                  <td>中平 剛志 先生</td>
-                  <td style="color:var(--gold-bright); font-weight:800;">${targetGrade}点</td>
-                </tr>
-                <tr>
-                  <td><strong>人間関係学</strong></td>
-                  <td>2単位 (15回)</td>
-                  <td>鈴木 暁子 先生</td>
-                  <td style="color:var(--gold-bright); font-weight:800;">${targetGrade}点</td>
-                </tr>
-                <tr>
-                  <td><strong>統計学</strong></td>
-                  <td>1単位 (8回)</td>
-                  <td>周藤 俊治 先生</td>
-                  <td style="color:var(--gold-bright); font-weight:800;">${targetGrade}点</td>
-                </tr>
-                <tr>
-                  <td><strong>病理学概論</strong></td>
-                  <td>1単位 (8回)</td>
-                  <td>橋本 和明 先生</td>
-                  <td style="color:var(--gold-bright); font-weight:800;">${targetGrade}点</td>
-                </tr>
-              </tbody>
-            </table>
+            <span class="term-badge">後期・4科目</span>
           </div>
-        `;
-      }
+          <p id="table-100-hint" style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">
+            以下の4科目は期末試験100%評価のため、<strong>期末試験で「${targetGrade}点」を取ればそのまま総合${targetGrade}点</strong>になります。
+          </p>
+          <table class="table-100">
+            <thead>
+              <tr>
+                <th>科目名</th>
+                <th>単位・回数</th>
+                <th>担当教員</th>
+                <th>必要素点</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>日常生活活動学</strong></td>
+                <td>2単位 (15回)</td>
+                <td>中平 剛志 先生</td>
+                <td class="target-grade-cell" style="color:var(--gold-bright); font-weight:800;">${targetGrade}点</td>
+              </tr>
+              <tr>
+                <td><strong>人間関係学</strong></td>
+                <td>2単位 (15回)</td>
+                <td>鈴木 暁子 先生</td>
+                <td class="target-grade-cell" style="color:var(--gold-bright); font-weight:800;">${targetGrade}点</td>
+              </tr>
+              <tr>
+                <td><strong>統計学</strong></td>
+                <td>1単位 (8回)</td>
+                <td>周藤 俊治 先生</td>
+                <td class="target-grade-cell" style="color:var(--gold-bright); font-weight:800;">${targetGrade}点</td>
+              </tr>
+              <tr>
+                <td><strong>病理学概論</strong></td>
+                <td>1単位 (8回)</td>
+                <td>橋本 和明 先生</td>
+                <td class="target-grade-cell" style="color:var(--gold-bright); font-weight:800;">${targetGrade}点</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      `;
 
-      // 3. Render Practical / Seminar Subjects Card
-      if (activeFilter === 'all' || activeFilter === 'practical') {
-        html += `
-          <div class="card">
-            <div class="card-top">
-              <div>
-                <div class="subj-name">実技・課題・実習 100% 科目</div>
-                <div class="subj-meta">定期筆記試験なし（平常点・実技・課題で100%評価）</div>
-              </div>
-              <span class="term-badge">3科目</span>
+      // Practical / Seminar Subjects Card
+      html += `
+        <div class="card" id="card-practical">
+          <div class="card-top">
+            <div>
+              <div class="subj-name">実技・課題・実習 100% 科目</div>
+              <div class="subj-meta">定期筆記試験なし（平常点・実技・課題で100%評価）</div>
             </div>
-            <table class="table-100">
-              <thead>
-                <tr>
-                  <th>科目名</th>
-                  <th>評価内訳（シラバス原文準拠）</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td><strong>理学療法演習Ⅱ</strong><br><small style="color:var(--text-secondary)">後期・必須 1単位</small></td>
-                  <td>実技の確認 <strong>40%</strong> ／ 課題提出 <strong>40%</strong> ／ 課題への取り組み・参加態度 <strong>20%</strong></td>
-                </tr>
-                <tr>
-                  <td><strong>臨床ゼミナールⅠ</strong><br><small style="color:var(--text-secondary)">通年・必須 2単位</small></td>
-                  <td>平常点 <strong>100%</strong>（発言等の積極性、理解度、グループワーク貢献度、提出課題等）</td>
-                </tr>
-                <tr>
-                  <td><strong>評価臨床実習Ⅰ</strong><br><small style="color:var(--text-secondary)">後期・必須 1単位</small></td>
-                  <td>実習関連（出席・デイリーノート・行動評価表・レポート）<strong>75%</strong> ／ 客観的臨床能力試験 <strong>25%</strong></td>
-                </tr>
-              </tbody>
-            </table>
+            <span class="term-badge">3科目</span>
           </div>
-        `;
-      }
+          <table class="table-100">
+            <thead>
+              <tr>
+                <th>科目名</th>
+                <th>評価内訳（シラバス原文準拠）</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>理学療法演習Ⅱ</strong><br><small style="color:var(--text-secondary)">後期・必須 1単位</small></td>
+                <td>実技の確認 <strong>40%</strong> ／ 課題提出 <strong>40%</strong> ／ 課題への取り組み・参加態度 <strong>20%</strong></td>
+              </tr>
+              <tr>
+                <td><strong>臨床ゼミナールⅠ</strong><br><small style="color:var(--text-secondary)">通年・必須 2単位</small></td>
+                <td>平常点 <strong>100%</strong>（発言等の積極性、理解度、グループワーク貢献度、提出課題等）</td>
+              </tr>
+              <tr>
+                <td><strong>評価臨床実習Ⅰ</strong><br><small style="color:var(--text-secondary)">後期・必須 1単位</small></td>
+                <td>実習関連（出席・デイリーノート・行動評価表・レポート）<strong>75%</strong> ／ 客観的臨床能力試験 <strong>25%</strong></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      `;
 
       container.innerHTML = html;
     }
 
+    // Startup
     loadStorage();
-    // Sync initial active target button
+    initDOM();
     document.querySelectorAll('.seg-btn').forEach(btn => {
       btn.classList.toggle('active', btn.textContent.startsWith(targetGrade + '点'));
     });
-    render();
+    updateSummaryUI();
   </script>
 </body>
 </html>
